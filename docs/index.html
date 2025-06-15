@@ -1,0 +1,100 @@
+
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>YOLOv8 웹캠 감지 데모</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <style>
+    body { font-family: sans-serif; text-align: center; background: #f0f0f0; }
+    video, canvas { border: 1px solid #ccc; margin-top: 10px; }
+    #error { color: red; }
+  </style>
+</head>
+<body>
+  <h1>📷 YOLOv8 웹캠 객체 감지</h1>
+  <video id="video" width="640" height="480" autoplay muted playsinline></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <div id="error"></div>
+  <script>
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const MODEL_URL = location.origin + "/models/yolov8n_oiv7_web_model/model.json";
+    const LABELS_URL = location.origin + "/models/yolov8n_oiv7_web_model/label.txt";
+    const CONF_THRESHOLD = 0.25;
+    const IOU_THRESHOLD = 0.45;
+    let model, labels;
+
+    async function setupCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+      return new Promise(resolve => {
+        video.onloadedmetadata = () => {
+          video.play();
+          resolve();
+        };
+      });
+    }
+
+    async function loadLabels(url) {
+      const res = await fetch(url);
+      const txt = await res.text();
+      return txt
+        .split("\n")
+        .filter(line => line.includes(":"))
+        .map(line => line.split(":")[1].trim());
+    }
+
+    async function detectFrame() {
+      if (!model || video.readyState !== 4) return requestAnimationFrame(detectFrame);
+      tf.engine().startScope();
+
+      const input = tf.browser.fromPixels(video).resizeBilinear([640, 640]).div(255).expandDims(0);
+      const output = await model.executeAsync(input);
+      const data = output[0].arraySync()[0];
+
+      const boxes = [], scores = [], classIndices = [];
+
+      data.forEach(row => {
+        const score = Math.max(...row.slice(4));
+        if (score > CONF_THRESHOLD) {
+          const classIdx = row.slice(4).indexOf(score);
+          const [x, y, w, h] = row.slice(0, 4);
+          const left = x - w / 2, top = y - h / 2;
+          boxes.push([top, left, top + h, left + w]);
+          scores.push(score);
+          classIndices.push(classIdx);
+        }
+      });
+
+      tf.image.nonMaxSuppressionAsync(tf.tensor2d(boxes), tf.tensor1d(scores), 20, IOU_THRESHOLD, CONF_THRESHOLD).then(indices => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        indices.arraySync().forEach(i => {
+          const [top, left, bottom, right] = boxes[i];
+          const className = labels[classIndices[i]];
+          ctx.strokeStyle = "#00FFFF";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(left, top, right - left, bottom - top);
+          ctx.fillStyle = "#000";
+          ctx.fillText(className, left, top > 10 ? top - 5 : top + 10);
+        });
+        tf.engine().endScope();
+        requestAnimationFrame(detectFrame);
+      });
+    }
+
+    async function main() {
+      await setupCamera();
+      model = await tf.loadGraphModel(MODEL_URL);
+      labels = await loadLabels(LABELS_URL);
+      detectFrame();
+    }
+
+    main().catch(err => {
+      document.getElementById("error").textContent = "오류 발생: " + err.message;
+      console.error(err);
+    });
+  </script>
+</body>
+</html>
